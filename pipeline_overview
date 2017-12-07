@@ -1,0 +1,76 @@
+## Generating mitogenome from shotgun sequencing data
+## requires: reference mitogenome
+## requires: bwa, samtools, bcftools (latter two same version)
+
+## Before running the pipeline, two things need to be done first
+## The first is to index the mitogenome fasta file ref.fasta
+## the reference index has prefix AImito for both
+bwa index -p AImito ref.fasta
+
+## also needs to be indexed by picard for gatk (this is for future analyses)
+java -jar /usr/local/Modules/modulefiles/tools//picard-tools/2.14.1/picard.jar \
+CreateSequenceDictionary R= /storage/home/users/elc6/genome/QCdata/AImitogen/AImito.fasta \
+O= /storage/home/users/elc6/genome/QCdata/AImitogen/AImito.dict
+
+## load programs
+
+module load bwa
+module load samtools/1.5
+module load bcftools/1.5
+
+##QC
+## trimming using trimmomatic
+java -jar /usr/local/Modules/modulefiles/tools/trimmomatic/0.32/bin/trimmomatic-0.32.jar PE -threads 6 -phred33 \
+/storage/home/users/elc6/genome/data/Sample_1-Eau09AI050/1-Eau09AI050_S1_L002_R1_001.fastq.gz \
+/storage/home/users/elc6/genome/data/Sample_1-Eau09AI050/1-Eau09AI050_S1_L002_R2_001.fastq.gz \
+Eau09AI050L2_forward_paired.fq \
+Eau09AI050L2_forward_unpaired.fq \
+Eau09AI050L2_reverse_paired.fq \
+Eau09AI050L2_reverse_unpaired.fq \
+LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:75
+
+## merge trimmed files
+cat  /storage/home/users/elc6/genome/QCdata/Eau08AI006_forward_paired.fq \
+/storage/home/users/elc6/genome/QCdata/Eau08AI006_forward_unpaired.fq \
+/storage/home/users/elc6/genome/QCdata/Eau08AI006_reverse_paired.fq \
+/storage/home/users/elc6/genome/QCdata/Eau08AI006_reverse_unpaired.fq > /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006cat.fq
+
+## align against mitogenome reference
+bwa mem /storage/home/users/elc6/genome/QCdata/AImitogen/AImito \
+	/storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006cat.fq > /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006aln.sam
+
+## convert to bam with samtools
+samtools view -h -S -b /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006aln.sam > /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006aln.bam
+
+## filter file so that only high quality mapping reads are retained
+samtools view -b -F 4 -q 30 /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006aln.bam > /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnQC.bam
+
+## sort reads
+samtools sort /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnQC.bam \
+ -o /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQC.bam
+ 
+## use picard to add read groups and take out duplicates
+java -jar /usr/local/Modules/modulefiles/tools/picard-tools/2.14.1/picard.jar MarkDuplicates \
+	INPUT= /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQC.bam \
+	OUTPUT= /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQCUniq.bam \
+	REMOVE_DUPLICATES=true \
+	METRICS_FILE=output.dup_metrics \
+	CREATE_INDEX=TRUE \
+	VALIDATION_STRINGENCY=SILENT
+
+java -jar /usr/local/Modules/modulefiles/tools/picard-tools/2.14.1/picard.jar AddOrReplaceReadGroups \
+      I=/storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQCUniq.bam \
+      O=/storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQCUniqRG.bam \
+      RGID=HJF3HB \
+      RGLB=Eau08AI006lib1 \
+     RGPU=HJF3HBBXX \
+      RGPL=illumina \
+      RGSM=Eau08AI006
+
+## use samtools and bcftools to create fastq file of alignment
+samtools mpileup -uf /storage/home/users/elc6/genome/QCdata/AImitogen/AImito.fasta \
+/storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006alnSortQCUniqRG.bam | \
+bcftools call -c | vcfutils.pl vcf2fq > /storage/home/users/elc6/genome/mitogenome_analysis/Eau08AI006cns.fq
+
+## can also get vcf file - it's created but not stored above
+samtools mpileup -uf AImitogen/AImito.fasta Eau08AI006alnSortQCUniqRG.bam | bcftools call -c > Eau08AI006SNPs.vcf
